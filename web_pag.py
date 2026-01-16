@@ -10,11 +10,11 @@ import altair as alt
 try:
     s3 = boto3.client(
         's3', 
-        aws_access_key_id=st.secrets["AWS_ACCESS_KEY"], 
-        aws_secret_access_key=st.secrets["AWS_SECRET_KEY"], 
-        region_name=st.secrets["AWS_REGION"]
+        AWS_ACCESS_KEY=st.secrets["AWS_ACCESS_KEY"], 
+        AWS_SECRET_KEY=st.secrets["AWS_SECRET_KEY"], 
+        AWS_REGION=st.secrets["AWS_REGION"]
     )
-    BUCKET = st.secrets["AWS_BUCKET_NAME"]
+    AWS_BUCKET_NAME= st.secrets["AWS_BUCKET_NAME"]
 except Exception as e:
     st.error("⚠️ Error de Configuración: No se encontraron las credenciales en secretos.")
     st.stop()
@@ -248,3 +248,4 @@ else:
                     st.session_state.conexion_s3 = "Desconectado"  # Actualizar estado en error
                     st.session_state.estado_csv = "Error"  # Error al leer CSV
                     st.error("Error al cargar el archivo seleccionado. Verifique la conexión.")
+
