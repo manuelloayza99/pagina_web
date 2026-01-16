@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import boto3
@@ -5,247 +6,231 @@ import json
 import time
 import altair as alt
 
-# --- CONFIGURACIÓN AWS (USANDO STREAMLIT SECRETS) ---
-# En GitHub, este código no tendrá las llaves. Se leerán desde Streamlit Cloud.
+# ── CREDENCIALES ── NUNCA en el código ────────────────────────────────
+# Usar st.secrets (en .streamlit/secrets.toml o en variables de entorno en la nube)
 try:
-    s3 = boto3.client(
-        's3', 
-        AWS_ACCESS_KEY=st.secrets["AWS_ACCESS_KEY"], 
-        AWS_SECRET_KEY=st.secrets["AWS_SECRET_KEY"], 
-        AWS_REGION=st.secrets["AWS_REGION"]
+    AWS_KEY    = st.secrets["aws"]["access_key_id"]
+    AWS_SECRET = st.secrets["aws"]["secret_access_key"]
+    BUCKET     = st.secrets["aws"]["bucket_name"]
+    REGION     = st.secrets["aws"].get("region", "us-east-2")
+except Exception:
+    st.error("Faltan credenciales AWS en st.secrets")
+    st.stop()
+
+# Cliente S3 cacheado
+@st.cache_resource
+def get_s3():
+    return boto3.client(
+        's3',
+        aws_access_key_id=AWS_KEY,
+        aws_secret_access_key=AWS_SECRET,
+        region_name=REGION
     )
-    AWS_BUCKET_NAME= st.secrets["AWS_BUCKET_NAME"]
-except Exception as e:
-    st.error("⚠️ Error de Configuración: No se encontraron las credenciales en secretos.")
-    st.stop()
 
-# Configuración de página
-# Inicializar estados de conexión y lectura
-if 'conexion_s3' not in st.session_state:
-    st.session_state.conexion_s3 = "Desconocido"
-if 'estado_json' not in st.session_state:
-    st.session_state.estado_json = "Pendiente"
-if 'estado_csv' not in st.session_state:
-    st.session_state.estado_csv = "Pendiente"
+s3 = get_s3()
 
-try:
-    s3 = boto3.client('s3', aws_access_key_id=ACCESS_KEY, aws_secret_access_key=SECRET_KEY, region_name=REGION)
-    st.session_state.conexion_s3 = "Conectado"
-except Exception as e:
-    st.error(f"Error de Conexion AWS: {e}")
-    st.session_state.conexion_s3 = "Desconectado"
-    st.stop()
+# Estados iniciales
+defaults = {
+    'conexion_s3': "Desconocido",
+    'estado_json': "Pendiente",
+    'estado_csv': "Pendiente",
+    'pausado': False,
+    'historial_vivo': pd.DataFrame(columns=["hora", "voltaje", "corriente", "potencia", "sd"]),
+    'consumo_acumulado': 0.0
+}
 
-st.set_page_config(page_title="Sistema de Gestion Energetica", layout="wide")
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# --- ESTILOS PROFESIONALES ---
+# ── Página ───────────────────────────────────────────────────────────
+st.set_page_config(page_title="Gestión Energética", layout="wide")
+
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
-    [data-testid="stMetric"] { background-color: #ffffff !important; padding: 20px; border-radius: 10px; border: 1px solid #dee2e6; }
-    [data-testid="stMetricLabel"] { color: #31333F !important; }
-    [data-testid="stMetricValue"] { color: #1a1c23 !important; }
+    [data-testid="stMetric"] {
+        background: white;
+        padding: 16px;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+    }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# --- NAVEGACIÓN ---
+# ── Sidebar ──────────────────────────────────────────────────────────
 st.sidebar.title("Panel de Control")
-# Indicador de conectividad en la sidebar
-if st.session_state.conexion_s3 == "Conectado":
-    st.sidebar.success("Estado Conexión S3: Conectado")
-elif st.session_state.conexion_s3 == "Desconectado":
-    st.sidebar.error("Estado Conexión S3: Desconectado")
-else:
-    st.sidebar.info("Estado Conexión S3: Desconocido")
 
-# Indicadores de lectura JSON y CSV
-if st.session_state.estado_json == "Leyendo correctamente":
-    st.sidebar.success("Estado JSON: Leyendo correctamente")
-elif st.session_state.estado_json == "Error":
-    st.sidebar.error("Estado JSON: Error al leer")
-else:
-    st.sidebar.info("Estado JSON: Pendiente")
+# Estados visuales
+st.sidebar.success("S3: Conectado") if st.session_state.conexion_s3 == "Conectado" else \
+st.sidebar.error("S3: Desconectado") if st.session_state.conexion_s3 == "Desconectado" else \
+st.sidebar.info("S3: Desconocido")
 
-if st.session_state.estado_csv == "Leyendo correctamente":
-    st.sidebar.success("Estado CSV: Leyendo correctamente")
-elif st.session_state.estado_csv == "Error":
-    st.sidebar.error("Estado CSV: Error al leer")
-else:
-    st.sidebar.info("Estado CSV: Pendiente")
+st.sidebar.success("JSON: OK") if st.session_state.estado_json == "Leyendo correctamente" else \
+st.sidebar.error("JSON: Error") if st.session_state.estado_json == "Error" else \
+st.sidebar.info("JSON: Pendiente")
 
-opcion = st.sidebar.radio("Seleccione vista:", ["Tiempo Real", "Historico"])
+st.sidebar.success("CSV: OK") if st.session_state.estado_csv == "Leyendo correctamente" else \
+st.sidebar.error("CSV: Error") if st.session_state.estado_csv == "Error" else \
+st.sidebar.info("CSV: Pendiente")
 
-# Contenedor Maestro para evitar que se peguen elementos
-main_placeholder = st.empty()
+vista = st.sidebar.radio("Vista", ["Tiempo Real", "Histórico"])
 
-if opcion == "Tiempo Real":
-    main_placeholder.empty()  # Limpiar contenido residual
-    if 'historial_vivo' not in st.session_state:
-        st.session_state.historial_vivo = pd.DataFrame(columns=["hora", "voltaje", "corriente", "potencia", "sd"])
-        st.session_state.consumo_acumulado = 0.0  # Nuevo: Consumo acumulado
-
-    # Controles adicionales (eliminé el slider de frecuencia)
-    pausa = st.sidebar.button("Pausar/Reanudar")
-    if 'pausado' not in st.session_state:
-        st.session_state.pausado = False
-    if pausa:
+if vista == "Tiempo Real":
+    if st.sidebar.button("⏸️ Pausar" if not st.session_state.pausado else "▶️ Reanudar"):
         st.session_state.pausado = not st.session_state.pausado
+        st.rerun()
 
-    while opcion == "Tiempo Real" and not st.session_state.pausado:
-        with main_placeholder.container():
-            st.title("Telemetria Energetica en Tiempo Real")
+# ── Contenido principal ──────────────────────────────────────────────
+if vista == "Tiempo Real":
+
+    st.title("Telemetría en Tiempo Real")
+
+    if st.session_state.pausado:
+        st.info("Actualización pausada")
+        st.button("Reanudar", type="primary")
+    else:
+        placeholder = st.empty()
+
+        with placeholder.container():
             try:
                 obj = s3.get_object(Bucket=BUCKET, Key="ultimo_dato.json")
-                dato = json.loads(obj['Body'].read().decode('utf-8'))
-                st.session_state.conexion_s3 = "Conectado"  # Actualizar estado en éxito
-                st.session_state.estado_json = "Leyendo correctamente"  # JSON leído correctamente
-                
-                if st.session_state.historial_vivo.empty or dato['hora'] != st.session_state.historial_vivo.iloc[-1]['hora']:
-                    nuevo = pd.DataFrame([{'hora': dato['hora'], 'voltaje': float(dato.get('voltaje', 0)), 
-                                          'corriente': float(dato.get('corriente', 0)), 'potencia': float(dato.get('potencia', 0)), 
-                                          'sd': str(dato.get('sd', '0'))}])
-                    st.session_state.historial_vivo = pd.concat([st.session_state.historial_vivo, nuevo], ignore_index=True).tail(30)
-                    # Actualizar consumo acumulado (frecuencia fija en 2 seg)
-                    st.session_state.consumo_acumulado += float(dato.get('potencia', 0)) * (2 / 3600)
+                dato = json.loads(obj['Body'].read().decode())
+
+                st.session_state.conexion_s3 = "Conectado"
+                st.session_state.estado_json = "Leyendo correctamente"
+
+                # Evitar duplicados por hora
+                if st.session_state.historial_vivo.empty or dato.get('hora') != st.session_state.historial_vivo.iloc[-1]['hora']:
+                    row = {
+                        'hora': dato['hora'],
+                        'voltaje': float(dato.get('voltaje', 0)),
+                        'corriente': float(dato.get('corriente', 0)),
+                        'potencia': float(dato.get('potencia', 0)),
+                        'sd': str(dato.get('sd', '0'))
+                    }
+                    st.session_state.historial_vivo = pd.concat([
+                        st.session_state.historial_vivo,
+                        pd.DataFrame([row])
+                    ], ignore_index=True).tail(60)  # últimos 60 puntos (~2 min)
+
+                    # Consumo (asumiendo ~2 s entre lecturas)
+                    st.session_state.consumo_acumulado += row['potencia'] * (2 / 3600)
 
                 ult = st.session_state.historial_vivo.iloc[-1]
-                
-                # METRICAS SIMPLIFICADAS: Solo Voltaje, Corriente, Potencia y SD
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Voltaje", f"{ult['voltaje']:.3f} V")
-                m2.metric("Corriente", f"{ult['corriente']:.3f} A")
-                m3.metric("Potencia", f"{ult['potencia']:.3f} W")
-                m4.metric("SD", ult['sd'])
 
-                # Métricas adicionales
-                a1, a2 = st.columns(2)
-                a1.metric("Consumo Acumulado", f"{st.session_state.consumo_acumulado:.4f} Wh")
-                tiempo_op = len(st.session_state.historial_vivo) * 2 / 3600  # Frecuencia fija en 2 seg
-                a2.metric("Tiempo de Operación", f"{tiempo_op:.2f} horas")
+                cols = st.columns(4)
+                cols[0].metric("Voltaje", f"{ult['voltaje']:.3f} V")
+                cols[1].metric("Corriente", f"{ult['corriente']:.3f} A")
+                cols[2].metric("Potencia", f"{ult['potencia']:.3f} W")
+                cols[3].metric("SD", ult['sd'])
 
-                # Alertas
+                cols2 = st.columns(2)
+                cols2[0].metric("Consumo Acum.", f"{st.session_state.consumo_acumulado:.4f} Wh")
+                cols2[1].metric("Tiempo op.", f"{len(st.session_state.historial_vivo)*2/3600:.2f} h")
+
                 if ult['voltaje'] < 220:
-                    st.warning("Alerta: Voltaje bajo detectado!")
+                    st.warning("⚠️ Voltaje bajo detectado")
 
-                st.subheader("Tendencia Instantanea - Voltaje")
-                chart_voltaje = alt.Chart(st.session_state.historial_vivo).mark_line(color='blue').encode(
-                    x=alt.X('hora:N', title='Tiempo'), y=alt.Y('voltaje:Q', title='Voltaje (V)', scale=alt.Scale(zero=False))
-                ).properties(height=300)  # Aumentado a 300
-                st.altair_chart(chart_voltaje, use_container_width=True)
+                for var, color, titulo in [
+                    ("voltaje", "blue", "Voltaje"),
+                    ("corriente", "red", "Corriente"),
+                    ("potencia", "green", "Potencia")
+                ]:
+                    st.subheader(f"Tendencia – {titulo}")
+                    ch = alt.Chart(st.session_state.historial_vivo).mark_line(color=color).encode(
+                        x=alt.X('hora:N', title="Hora"),
+                        y=alt.Y(f"{var}:Q", title=f"{titulo}", scale=alt.Scale(zero=False))
+                    ).properties(height=280)
+                    st.altair_chart(ch, use_container_width=True)
 
-                st.subheader("Tendencia Instantanea - Corriente")
-                chart_corriente = alt.Chart(st.session_state.historial_vivo).mark_line(color='red').encode(
-                    x=alt.X('hora:N', title='Tiempo'), y=alt.Y('corriente:Q', title='Corriente (A)', scale=alt.Scale(zero=False))
-                ).properties(height=300)  # Aumentado a 300
-                st.altair_chart(chart_corriente, use_container_width=True)
+                st.subheader("Registros recientes")
+                st.dataframe(st.session_state.historial_vivo.sort_index(ascending=False), use_container_width=True, hide_index=True)
 
-                st.subheader("Tendencia Instantanea - Potencia")
-                chart_potencia = alt.Chart(st.session_state.historial_vivo).mark_line(color='green').encode(
-                    x=alt.X('hora:N', title='Tiempo'), y=alt.Y('potencia:Q', title='Potencia (W)', scale=alt.Scale(zero=False))
-                ).properties(height=300)  # Aumentado a 300
-                st.altair_chart(chart_potencia, use_container_width=True)
+                if st.button("Descargar sesión actual"):
+                    st.download_button(
+                        "Descargar CSV",
+                        st.session_state.historial_vivo.to_csv(index=False),
+                        "historial_tiempo_real.csv",
+                        "text/csv"
+                    )
 
-                st.subheader("Registros de la Sesion Actual")
-                st.dataframe(st.session_state.historial_vivo.sort_index(ascending=False), use_container_width=True, key="tabla_real_time")
+            except Exception as e:
+                st.session_state.conexion_s3 = "Desconectado"
+                st.session_state.estado_json = "Error"
+                st.info("Reconectando...")
 
-                # Exportar datos
-                if st.button("Descargar Historial Actual como CSV"):
-                    csv = st.session_state.historial_vivo.to_csv(index=False)
-                    st.download_button("Descargar", csv, "historial_real_time.csv", "text/csv")
+        # Espera y rerun (solo si no pausado)
+        if not st.session_state.pausado:
+            time.sleep(2.0)
+            st.rerun()
 
-            except Exception:
-                st.session_state.conexion_s3 = "Desconectado"  # Actualizar estado en error
-                st.session_state.estado_json = "Error"  # Error al leer JSON
-                st.info("Sincronizando flujo de datos...")
-            
-            time.sleep(2)  # Frecuencia fija en 2 segundos
-            if opcion != "Tiempo Real": break
+else:  # Histórico
 
-else:
-    # SECCION HISTORICO TOTALMENTE INDEPENDIENTE
-    main_placeholder.empty()  # Limpiar contenido residual
-    with main_placeholder.container():
-        st.title("Analisis de Datos Historicos")
-        try:
-            response = s3.list_objects_v2(Bucket=BUCKET)
-            st.session_state.conexion_s3 = "Conectado"  # Actualizar estado en éxito
-            archivos = sorted([obj['Key'] for obj in response.get('Contents', []) if obj['Key'].endswith('.csv')], reverse=True)
-        except Exception:
-            st.session_state.conexion_s3 = "Desconectado"  # Actualizar estado en error
-            archivos = []
-            st.error("Error al acceder a archivos históricos. Verifique la conexión.")
-        
-        if archivos:
-            archivo_sel = st.selectbox("Seleccione reporte para analisis:", archivos)  # Solo esta opción, sin filtros
+    st.title("Análisis Histórico")
 
-            if st.button("Generar Reporte Detallado"):
-                try:
-                    obj = s3.get_object(Bucket=BUCKET, Key=archivo_sel)
-                    st.session_state.conexion_s3 = "Conectado"  # Actualizar estado en éxito
-                    df = pd.read_csv(obj['Body'], names=["fecha", "hora", "voltaje", "corriente", "potencia", "sd"])
-                    df['voltaje'] = pd.to_numeric(df['voltaje'], errors='coerce')
-                    df['fecha'] = pd.to_datetime(df['fecha'], errors='coerce')
-                    # Sin filtros aplicados
-                    st.session_state.estado_csv = "Leyendo correctamente"  # CSV leído correctamente
-                    
-                    # METRICAS NUEVAS HISTORICO
-                    h1, h2, h3, h4 = st.columns(4)
-                    h1.metric("Voltaje Maximo", f"{df['voltaje'].max():.2f} V")
-                    h2.metric("Voltaje Minimo", f"{df['voltaje'].min():.2f} V")
-                    h3.metric("Estabilidad (SDV)", f"{df['voltaje'].std():.3f}")
-                    energia = (df['potencia'].sum() * 5) / 3600
-                    h4.metric("Energia Total", f"{energia:.4f} Wh")
+    try:
+        resp = s3.list_objects_v2(Bucket=BUCKET)
+        archivos = sorted(
+            [o['Key'] for o in resp.get('Contents', []) if o['Key'].endswith('.csv')],
+            reverse=True
+        )
+        st.session_state.conexion_s3 = "Conectado"
+    except:
+        st.session_state.conexion_s3 = "Desconectado"
+        archivos = []
+        st.error("No se pudo listar archivos")
 
-                    # Métricas adicionales
-                    p1, p2 = st.columns(2)
-                    p1.metric("Promedio Potencia", f"{df['potencia'].mean():.2f} W")
-                    tiempo_total = len(df) * 5 / 3600  # Asumiendo 5 seg por fila
-                    p2.metric("Tiempo Total Operación", f"{tiempo_total:.2f} horas")
+    if archivos:
+        sel = st.selectbox("Archivo", archivos)
 
-                    # Correlación manual usando pandas (sin scipy)
-                    if len(df) > 1:
-                        corr = df['voltaje'].corr(df['corriente'])
-                        st.metric("Correlación V-I", f"{corr:.2f}")
+        if st.button("Cargar y analizar", type="primary"):
+            try:
+                obj = s3.get_object(Bucket=BUCKET, Key=sel)
+                df = pd.read_csv(obj['Body'], names=["fecha","hora","voltaje","corriente","potencia","sd"])
+                df['voltaje'] = pd.to_numeric(df['voltaje'], errors='coerce')
+                df['potencia'] = pd.to_numeric(df['potencia'], errors='coerce')
+                df['corriente'] = pd.to_numeric(df['corriente'], errors='coerce')
 
-                    # Gráficos separados como en Tiempo Real
-                    st.subheader("Tendencia Historica - Voltaje")
-                    chart_voltaje_hist = alt.Chart(df).mark_line(color='blue').encode(
-                        x=alt.X('hora:N', title='Tiempo'), y=alt.Y('voltaje:Q', title='Voltaje (V)', scale=alt.Scale(zero=False))
-                    ).properties(height=300)
-                    st.altair_chart(chart_voltaje_hist, use_container_width=True)
+                st.session_state.estado_csv = "Leyendo correctamente"
 
-                    st.subheader("Tendencia Historica - Corriente")
-                    chart_corriente_hist = alt.Chart(df).mark_line(color='red').encode(
-                        x=alt.X('hora:N', title='Tiempo'), y=alt.Y('corriente:Q', title='Corriente (A)', scale=alt.Scale(zero=False))
-                    ).properties(height=300)
-                    st.altair_chart(chart_corriente_hist, use_container_width=True)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("V máx", f"{df['voltaje'].max():.2f} V")
+                c2.metric("V mín", f"{df['voltaje'].min():.2f} V")
+                c3.metric("Estabilidad (std)", f"{df['voltaje'].std():.3f}")
+                energia = df['potencia'].sum() * 5 / 3600
+                c4.metric("Energía total", f"{energia:.4f} Wh")
 
-                    st.subheader("Tendencia Historica - Potencia")
-                    chart_potencia_hist = alt.Chart(df).mark_line(color='green').encode(
-                        x=alt.X('hora:N', title='Tiempo'), y=alt.Y('potencia:Q', title='Potencia (W)', scale=alt.Scale(zero=False))
-                    ).properties(height=300)
-                    st.altair_chart(chart_potencia_hist, use_container_width=True)
+                c5, c6 = st.columns(2)
+                c5.metric("Potencia prom.", f"{df['potencia'].mean():.2f} W")
+                c6.metric("Tiempo total", f"{len(df)*5/3600:.2f} h")
 
-                    st.subheader("Analisis de Estabilidad de Voltaje")
-                    hist = alt.Chart(df).mark_bar(color='#555555').encode(
-                        x=alt.X("voltaje:Q", bin=alt.Bin(maxbins=15), title="Rango de Voltaje"),
-                        y=alt.Y('count()', title='Frecuencia')
-                    ).properties(height=300)
-                    st.altair_chart(hist, use_container_width=True)
+                if len(df) > 1:
+                    st.metric("Corr. V-I", f"{df['voltaje'].corr(df['corriente']):.2f}")
 
-                    # Gráfico adicional: Scatter Voltaje vs Corriente
-                    st.subheader("Relación Voltaje-Corriente")
-                    scatter = alt.Chart(df).mark_circle().encode(
-                        x='voltaje:Q', y='corriente:Q', tooltip=['voltaje', 'corriente']
-                    ).properties(height=300)
-                    st.altair_chart(scatter, use_container_width=True)
+                for var, color, tit in [("voltaje","blue","Voltaje"), ("corriente","red","Corriente"), ("potencia","green","Potencia")]:
+                    st.subheader(f"Tendencia – {tit}")
+                    ch = alt.Chart(df).mark_line(color=color).encode(
+                        x='hora:N', y=f"{var}:Q", scale=alt.Scale(zero=False)
+                    ).properties(height=280)
+                    st.altair_chart(ch, use_container_width=True)
 
-                    # Exportar datos filtrados
-                    if st.button("Descargar Datos Filtrados como CSV"):
-                        csv = df.to_csv(index=False)
-                        st.download_button("Descargar", csv, "datos_filtrados.csv", "text/csv")
-                except Exception:
-                    st.session_state.conexion_s3 = "Desconectado"  # Actualizar estado en error
-                    st.session_state.estado_csv = "Error"  # Error al leer CSV
-                    st.error("Error al cargar el archivo seleccionado. Verifique la conexión.")
+                st.subheader("Distribución Voltaje")
+                hist = alt.Chart(df).mark_bar(color='#555').encode(
+                    x=alt.X("voltaje:Q", bin=alt.Bin(maxbins=20)),
+                    y='count()'
+                ).properties(height=300)
+                st.altair_chart(hist, use_container_width=True)
 
+                st.download_button(
+                    "Descargar datos",
+                    df.to_csv(index=False),
+                    f"{sel.replace('.csv','')}_procesado.csv",
+                    "text/csv"
+                )
+
+            except Exception as e:
+                st.session_state.estado_csv = "Error"
+                st.error(f"Error al leer archivo: {e}")
+    else:
+        st.info("No hay archivos .csv en el bucket")
