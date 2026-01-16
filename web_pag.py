@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import boto3
@@ -7,7 +6,7 @@ import time
 import altair as alt
 
 # ────────────────────────────────────────────────
-#  CONFIGURACIÓN AWS - USAR st.secrets (NO HARDCODEAR)
+#  CONFIGURACIÓN AWS - desde st.secrets
 # ────────────────────────────────────────────────
 try:
     ACCESS_KEY = st.secrets["aws"]["access_key_id"]
@@ -15,10 +14,10 @@ try:
     BUCKET     = st.secrets["aws"]["bucket"]
     REGION     = st.secrets["aws"].get("region", "us-east-2")
 except Exception as e:
-    st.error("No se encuentran las credenciales AWS en st.secrets. Configúralas en .streamlit/secrets.toml (local) o en la plataforma de despliegue.")
+    st.error("No se encuentran las credenciales AWS en st.secrets")
     st.stop()
 
-# Cliente S3 (cacheado para no recrearlo cada rerun)
+# Cliente S3 cacheado
 @st.cache_resource
 def get_s3_client():
     return boto3.client(
@@ -31,7 +30,7 @@ def get_s3_client():
 s3 = get_s3_client()
 
 # ────────────────────────────────────────────────
-#  Estados de sesión
+# Estados de sesión
 # ────────────────────────────────────────────────
 if 'conexion_s3' not in st.session_state:
     st.session_state.conexion_s3 = "Desconocido"
@@ -46,26 +45,55 @@ if 'pausado' not in st.session_state:
     st.session_state.pausado = False
 
 
+# ────────────────────────────────────────────────
+# Configuración de página
+# ────────────────────────────────────────────────
 st.set_page_config(page_title="Sistema de Gestión Energética", layout="wide")
 
+
 # ────────────────────────────────────────────────
-#  ESTILOS
+# ESTILOS - valores de métricas mucho más notorios
 # ────────────────────────────────────────────────
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
+
+    /* Cuadrados blancos de métricas */
     [data-testid="stMetric"] {
         background-color: #ffffff !important;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #dee2e6;
+        padding: 24px !important;
+        border-radius: 12px !important;
+        border: 1px solid #cbd5e1 !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important;
+        margin-bottom: 16px;
+    }
+
+    /* Etiqueta (Voltaje, Corriente, etc.) */
+    [data-testid="stMetricLabel"] {
+        color: #475569 !important;
+        font-size: 1.15rem !important;
+        font-weight: 600 !important;
+    }
+
+    /* VALOR PRINCIPAL → muy destacado */
+    [data-testid="stMetricValue"] {
+        color: #0f172a !important;          /* negro muy oscuro */
+        font-size: 2.8rem !important;       /* grande */
+        font-weight: 900 !important;        /* ultra negrita */
+        letter-spacing: -0.8px;
+        line-height: 1.05;
+    }
+
+    /* Delta (por si lo usas después) */
+    [data-testid="stMetricDelta"] {
+        font-size: 1.1rem !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
 
 # ────────────────────────────────────────────────
-#  SIDEBAR
+# SIDEBAR - Panel de control
 # ────────────────────────────────────────────────
 st.sidebar.title("Panel de Control")
 
@@ -92,21 +120,19 @@ else:
 
 opcion = st.sidebar.radio("Seleccione vista:", ["Tiempo Real", "Histórico"])
 
-# Botón pausar solo visible en Tiempo Real
 if opcion == "Tiempo Real":
     if st.sidebar.button("Pausar / Reanudar"):
         st.session_state.pausado = not st.session_state.pausado
-        st.rerun()  # Refresca inmediatamente
+        st.rerun()
 
 
 # ────────────────────────────────────────────────
-#  CONTENIDO PRINCIPAL
+# CONTENIDO PRINCIPAL
 # ────────────────────────────────────────────────
 placeholder = st.empty()
 
 if opcion == "Tiempo Real":
     placeholder.empty()
-
     with placeholder.container():
         st.title("Telemetría Energética en Tiempo Real")
 
@@ -120,7 +146,7 @@ if opcion == "Tiempo Real":
                 st.session_state.conexion_s3 = "Conectado"
                 st.session_state.estado_json = "Leyendo correctamente"
 
-                # Agregar solo si es nuevo
+                # Agregar solo si es dato nuevo
                 if st.session_state.historial_vivo.empty or dato['hora'] != st.session_state.historial_vivo.iloc[-1]['hora']:
                     nuevo = pd.DataFrame([{
                         'hora': dato['hora'],
@@ -131,13 +157,13 @@ if opcion == "Tiempo Real":
                     }])
                     st.session_state.historial_vivo = pd.concat(
                         [st.session_state.historial_vivo, nuevo], ignore_index=True
-                    ).tail(60)  # Puedes aumentar a 100–200 si quieres más historia
+                    ).tail(60)
 
                     st.session_state.consumo_acumulado += float(dato.get('potencia', 0)) * (2 / 3600)
 
                 ult = st.session_state.historial_vivo.iloc[-1]
 
-                # Métricas
+                # Métricas (ahora con valores muy notorios gracias al CSS)
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Voltaje", f"{ult['voltaje']:.3f} V")
                 m2.metric("Corriente", f"{ult['corriente']:.3f} A")
@@ -149,7 +175,7 @@ if opcion == "Tiempo Real":
                 a2.metric("Tiempo de Operación", f"{len(st.session_state.historial_vivo) * 2 / 3600:.2f} horas")
 
                 if ult['voltaje'] < 220:
-                    st.warning("Alerta: Voltaje bajo detectado!")
+                    st.warning("⚠️ Alerta: Voltaje bajo detectado!")
 
                 # Gráficos
                 for var, color, title in [
@@ -160,7 +186,7 @@ if opcion == "Tiempo Real":
                     st.subheader(f"Tendencia Instantánea - {title}")
                     chart = alt.Chart(st.session_state.historial_vivo).mark_line(color=color).encode(
                         x=alt.X('hora:N', title='Tiempo'),
-                        y=alt.Y(f'{var}:Q', title=f'{title} ({var[0].upper()})', scale=alt.Scale(zero=False))
+                        y=alt.Y(f'{var}:Q', title=f'{title}', scale=alt.Scale(zero=False))
                     ).properties(height=300)
                     st.altair_chart(chart, use_container_width=True)
 
@@ -171,19 +197,18 @@ if opcion == "Tiempo Real":
                     csv = st.session_state.historial_vivo.to_csv(index=False).encode('utf-8')
                     st.download_button("Descargar", csv, "historial_real_time.csv", "text/csv")
 
-            except Exception as e:
+            except Exception:
                 st.session_state.conexion_s3 = "Desconectado"
                 st.session_state.estado_json = "Error"
                 st.info("Intentando reconectar... (se actualizará automáticamente)")
 
-            # Espera y rerun automático (solo si no está pausado)
+            # Solo si no está pausado → espera y refresca
             if not st.session_state.pausado:
                 time.sleep(2)
                 st.rerun()
 
 else:  # Histórico
     placeholder.empty()
-
     with placeholder.container():
         st.title("Análisis de Datos Históricos")
 
@@ -211,7 +236,7 @@ else:  # Histórico
 
                     st.session_state.estado_csv = "Leyendo correctamente"
 
-                    # Métricas
+                    # Métricas destacadas
                     h1, h2, h3, h4 = st.columns(4)
                     h1.metric("Voltaje Máximo", f"{df['voltaje'].max():.2f} V")
                     h2.metric("Voltaje Mínimo", f"{df['voltaje'].min():.2f} V")
@@ -227,7 +252,7 @@ else:  # Histórico
                         corr = df['voltaje'].corr(df['corriente'])
                         st.metric("Correlación V-I", f"{corr:.2f}")
 
-                    # Gráficos (similar a tiempo real)
+                    # Gráficos
                     for var, color, title in [
                         ('voltaje', 'blue', 'Voltaje'),
                         ('corriente', 'red', 'Corriente'),
@@ -253,7 +278,6 @@ else:  # Histórico
                     ).properties(height=300)
                     st.altair_chart(scatter, use_container_width=True)
 
-                    # Descarga
                     if st.button("Descargar Datos como CSV"):
                         csv = df.to_csv(index=False).encode('utf-8')
                         st.download_button("Descargar", csv, "datos_historicos.csv", "text/csv")
