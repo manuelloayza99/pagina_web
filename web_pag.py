@@ -61,20 +61,20 @@ def listar_archivos_csv_s3():
         st.sidebar.error(f"No se pudo listar archivos: {str(e)}")
         return []
 
-def generar_grafico(df, variable, color, titulo_y):
+def generar_grafico(df, variable, color, titulo_y, unidad=""):
     df[variable] = pd.to_numeric(df[variable], errors='coerce')
     df = df.dropna(subset=[variable])
-   
+    
     chart = alt.Chart(df).mark_line(
         color=color,
         strokeWidth=2,
         interpolate='monotone'
     ).encode(
         x=alt.X('hora:N', title='Tiempo', axis=alt.Axis(labelAngle=-45)),
-        y=alt.Y(f'{variable}:Q', title=titulo_y, scale=alt.Scale(zero=False)),
+        y=alt.Y(f'{variable}:Q', title=f"{titulo_y} ({unidad})", scale=alt.Scale(zero=False)),
         tooltip=['hora', variable]
     ).properties(height=350)
-   
+    
     return chart + chart.mark_point(size=50, color=color, fill='white')
 
 # ────────────────────────────────────────────────
@@ -118,7 +118,6 @@ if opcion == "⚡ Tiempo Real (JSON)":
 
             if contenido:
                 dato_actual = json.loads(contenido)
-
                 placeholder_status.empty()
 
                 if st.session_state.historial_vivo.empty or \
@@ -148,12 +147,12 @@ if opcion == "⚡ Tiempo Real (JSON)":
                     col1, col2 = st.columns(2)
                     with col1:
                         st.altair_chart(
-                            generar_grafico(st.session_state.historial_vivo, 'voltaje', '#FF4B4B', 'Tensión (V)'),
+                            generar_grafico(st.session_state.historial_vivo, 'voltaje', '#FF4B4B', 'Tensión', 'V'),
                             use_container_width=True
                         )
                     with col2:
                         st.altair_chart(
-                            generar_grafico(st.session_state.historial_vivo, 'potencia', '#2ECC71', 'Potencia (W)'),
+                            generar_grafico(st.session_state.historial_vivo, 'potencia', '#2ECC71', 'Potencia', 'W'),
                             use_container_width=True
                         )
 
@@ -164,7 +163,7 @@ if opcion == "⚡ Tiempo Real (JSON)":
                         use_container_width=True
                     )
 
-        except Exception as e:
+        except Exception:
             placeholder_status.info("🔄 Sincronizando datos... (esperando nuevo JSON)")
 
         time.sleep(2)
@@ -174,7 +173,7 @@ if opcion == "⚡ Tiempo Real (JSON)":
 # ────────────────────────────────────────────────
 else:
     st.title("Historial de Consumo")
-    
+
     archivos_csv = listar_archivos_csv_s3()
 
     if archivos_csv:
@@ -192,22 +191,22 @@ else:
                 st.success(f"Reporte cargado: **{archivo_sel}**  ({len(df_hist)} registros)")
 
                 h1, h2, h3, h4 = st.columns(4)
-                h1.metric("Voltaje Máximo", f"{pd.to_numeric(df_hist['voltaje']).max():.2f} V")
+                h1.metric("Voltaje Máximo",   f"{pd.to_numeric(df_hist['voltaje']).max():.2f} V")
                 h2.metric("Voltaje Promedio", f"{pd.to_numeric(df_hist['voltaje']).mean():.2f} V")
-                h3.metric("Potencia Promedio", f"{pd.to_numeric(df_hist['potencia']).mean():.2f} W")
+                h3.metric("Potencia Promedio",f"{pd.to_numeric(df_hist['potencia']).mean():.2f} W")
                 h4.metric("Registros Totales", len(df_hist))
 
                 st.altair_chart(
-                    generar_grafico(df_hist, 'voltaje', '#1f77b4', 'Voltaje (V)'),
+                    generar_grafico(df_hist, 'voltaje', '#1f77b4', 'Voltaje', 'V'),
                     use_container_width=True
                 )
 
                 st.altair_chart(
-                    generar_grafico(df_hist, 'potencia', '#27ae60', 'Potencia (W)'),
+                    generar_grafico(df_hist, 'potencia', '#27ae60', 'Potencia', 'W'),
                     use_container_width=True
                 )
 
-                st.subheader("Tabla completa")
+                st.subheader("Tabla completa del reporte")
                 st.dataframe(df_hist, use_container_width=True)
 
             except Exception as e:
