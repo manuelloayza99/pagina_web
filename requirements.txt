@@ -2,5 +2,6 @@ streamlit
 pandas
 boto3
 altair
+time
 
 
